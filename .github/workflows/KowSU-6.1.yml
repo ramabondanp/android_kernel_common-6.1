@@ -36,42 +36,19 @@ jobs:
           remove-haskell: 'true'
           remove-codeql: 'true'
 
-      - name: Cache Dependencies
-        id: cache-deps
-        uses: actions/cache@v3
-        with:
-          path: /var/cache/apt
-          key: ${{ runner.os }}-apt-${{ hashFiles('**/fix-apt-packages.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-apt-
-
       - name: Install Dependencies
         run: |
           apt-get update
           # FIX: Tambahkan 'dwarves' (untuk pahole) dan 'libelf-dev'
-          # Tambahkan cross-compilation tools secara eksplisit
           apt-get install -y build-essential bc bison flex libssl-dev git curl \
           python3 python3-pip lld zip unzip libncurses5-dev rsync \
-          cpio schedtool git-core gnupg libelf-dev dwarves \
-          aarch64-linux-gnu-gcc arm-linux-gnueabihf-gcc \
-          device-tree-compiler
-
-      - name: Cache Repo Tool
-        id: cache-repo
-        uses: actions/cache@v3
-        with:
-          path: ~/bin
-          key: ${{ runner.os }}-repo-tool-${{ hashFiles('**/setup-repo.sh') }}
-          restore-keys: |
-            ${{ runner.os }}-repo-tool-
+          cpio schedtool git-core gnupg libelf-dev dwarves
 
       - name: Setup Repo Tool
         run: |
           mkdir -p ~/bin
-          if [ ! -f ~/bin/repo ]; then
-            curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
-            chmod a+x ~/bin/repo
-          fi
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
       - name: Configure Git
@@ -80,34 +57,14 @@ jobs:
           git config --global user.email "action@github.com"
           git config --global url."https://".insteadOf git://
 
-      - name: Cache Kernel Source
-        id: cache-source
-        uses: actions/cache@v3
-        with:
-          path: gki
-          key: ${{ runner.os }}-kernel-source-${{ github.event.inputs.clang_version }}-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-kernel-source-${{ github.event.inputs.clang_version }}-
-
       - name: Initialize & Sync Source (GKI 6.1)
-        if: steps.cache-source.outputs.cache-hit != 'true'
         run: |
           mkdir gki
           cd gki
           repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1
-          repo sync -j$(nproc) --force-sync --no-tags --current-branch
-
-      - name: Cache Clang Toolchain
-        id: cache-clang
-        uses: actions/cache@v3
-        with:
-          path: gki/toolchain/clang
-          key: ${{ runner.os }}-clang-${{ github.event.inputs.clang_version }}
-          restore-keys: |
-            ${{ runner.os }}-clang-
+          repo sync -j$(nproc) --force-sync
 
       - name: Setup Custom Clang
-        if: steps.cache-clang.outputs.cache-hit != 'true'
         working-directory: gki
         run: |
           mkdir -p toolchain/clang
@@ -140,14 +97,12 @@ jobs:
           cp sus_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch .
           
           echo "Applying SUSFS Patch..."
-          patch -p1 < 50_add_susfs_in_gki-android14-6.1.patch || echo "Some patches may have failed, continuing..."
+          patch -p1 < 50_add_susfs_in_gki-android14-6.1.patch || true
           
           echo "Fixing fs/proc/base.c conflict..."
           grep -q "linux/susfs.h" fs/proc/base.c || sed -i '/#include <linux\/fs.h>/a #include <linux/susfs.h>' fs/proc/base.c
           
-          # Clean up
-          rm -rf sus_temp 50_add_susfs_in_gki-android14-6.1.patch
-          find . -name "*.rej" -delete
+          rm -rf sus_temp 50_add_susfs_in_gki-android14-6.1.patch fs/proc/base.c.rej
 
       - name: Configure Kernel
         working-directory: gki/common
@@ -208,15 +163,8 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabihf-
           
-          echo "Starting Build with $(nproc) jobs..."
-          make -j$(nproc) O=out Image 2>&1 | tee build.log
-          
-          # Cek apakah build berhasil
-          if [ ! -f out/arch/arm64/boot/Image ]; then
-            echo "Build failed! Check build.log for errors."
-            tail -n 100 build.log
-            exit 1
-          fi
+          echo "Starting Build..."
+          make -j"$(nproc --all)" O=out Image
 
       - name: Determine Artifact Name
         id: artifact-name
@@ -227,17 +175,9 @@ jobs:
             echo "NAME=${{ github.event.inputs.kernel_name }}-Image" >> $GITHUB_ENV
           fi
 
-      - name: Upload Build Log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: gki/common/build.log
-
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.NAME }}
           path: gki/common/out/arch/arm64/boot/Image
           compression-level: 9
-          retention-days: 30
