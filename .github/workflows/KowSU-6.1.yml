@@ -15,11 +15,6 @@ on:
         options:
         - 'r536225 (Clang 19)'
         - 'r547379 (Clang 20)'
-      enable_ccache:
-        description: 'Aktifkan ccache untuk mempercepat kompilasi'
-        required: true
-        default: true
-        type: boolean
 
 jobs:
   build:
@@ -29,18 +24,17 @@ jobs:
 
     env:
       DEBIAN_FRONTEND: noninteractive
-      CCACHE_DIR: /github/home/.ccache
-      CCACHE_MAXSIZE: 10G
 
     steps:
-      - name: Free Up Disk Space
-        run: |
-          # Bersihkan ruang disk yang tidak perlu
-          rm -rf /usr/share/dotnet
-          rm -rf /opt/ghc
-          rm -rf /usr/local/share/boost
-          apt-get clean
-          df -h
+      - name: Cleanup & Maximize Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          swap-size-mb: 10240
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
 
       - name: Cache Dependencies
         id: cache-deps
@@ -54,22 +48,13 @@ jobs:
       - name: Install Dependencies
         run: |
           apt-get update
-          # Install dependencies yang diperlukan untuk build kernel Android
+          # FIX: Tambahkan 'dwarves' (untuk pahole) dan 'libelf-dev'
           # Tambahkan cross-compilation tools secara eksplisit
           apt-get install -y build-essential bc bison flex libssl-dev git curl \
           python3 python3-pip lld zip unzip libncurses5-dev rsync \
           cpio schedtool git-core gnupg libelf-dev dwarves \
-          ccache aarch64-linux-gnu-gcc arm-linux-gnueabihf-gcc \
+          aarch64-linux-gnu-gcc arm-linux-gnueabihf-gcc \
           device-tree-compiler
-
-      - name: Setup ccache
-        if: ${{ github.event.inputs.enable_ccache == 'true' }}
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: ${{ runner.os }}-kernel-ccache-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-kernel-ccache-
-          max-size: 10G
 
       - name: Cache Repo Tool
         id: cache-repo
@@ -107,7 +92,7 @@ jobs:
       - name: Initialize & Sync Source (GKI 6.1)
         if: steps.cache-source.outputs.cache-hit != 'true'
         run: |
-          mkdir -p gki
+          mkdir gki
           cd gki
           repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1
           repo sync -j$(nproc) --force-sync --no-tags --current-branch
@@ -150,7 +135,6 @@ jobs:
           echo "Cloning SUSFS Patches (Branch: gki-android14-6.1)..."
           git clone https://gitlab.com/simonpunk/susfs4ksu/ -b gki-android14-6.1 sus_temp
           
-          # Copy patch files
           cp -r sus_temp/kernel_patches/fs/* fs/
           cp -r sus_temp/kernel_patches/include/* include/
           cp sus_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch .
@@ -223,12 +207,6 @@ jobs:
           export LLVM=1
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_COMPAT=arm-linux-gnueabihf-
-          
-          # Optimize jumlah job berdasarkan sumber daya yang tersedia
-          # Gunakan ccache jika diaktifkan
-          if [ "${{ github.event.inputs.enable_ccache }}" == "true" ]; then
-            export CC="ccache clang"
-          fi
           
           echo "Starting Build with $(nproc) jobs..."
           make -j$(nproc) O=out Image 2>&1 | tee build.log
